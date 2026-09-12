@@ -67,12 +67,13 @@ class ProxyTokenTests(unittest.TestCase):
             output = stack.enter_context(redirect_stdout(io.StringIO()))
             uploaded = {}
 
-            def run(*args):
+            def run(*args, **kwargs):
                 if '--secrets-file' in args:
                     uploaded.update(json.loads(Path(args[-1]).read_text()))
                     self.assertNotIn('generated-token', output.getvalue())
                 if fail:
                     raise subprocess.CalledProcessError(1, 'deploy')
+                return '  https://test-worker.example.workers.dev\n'
 
             stack.enter_context(patch.object(deploy, 'run', side_effect=run))
             if fail:
@@ -90,10 +91,11 @@ class ProxyTokenTests(unittest.TestCase):
         self.assertEqual(prompts, 1)
         self.assertEqual(calls[0].args, (32,))
 
-    def test_manual_token_is_not_displayed(self):
+    def test_manual_token_is_in_config_after_success(self):
         uploaded, output, prompts, calls = self.exercise(choice=['invalid', '2'])
         self.assertEqual(uploaded['PROXY_TOKEN'], 'manual-token')
-        self.assertNotIn('manual-token', output)
+        self.assertIn('headers = x-proxy-token,manual-token', output)
+        self.assertIn('[b2proxy]\ntype = http\nurl = https://test-worker.example.workers.dev/\n', output)
         self.assertEqual(prompts, 2)
         self.assertFalse(calls)
 
@@ -101,10 +103,29 @@ class ProxyTokenTests(unittest.TestCase):
         uploaded, output, prompts, calls = self.exercise(choice=[], dry_run=True)
         self.assertFalse(uploaded or prompts or calls)
         self.assertNotIn('generated-token', output)
+        self.assertNotIn('[b2proxy]', output)
 
     def test_failed_deploy_does_not_display_token(self):
         _, output, _, _ = self.exercise(fail=True)
         self.assertNotIn('generated-token', output)
+        self.assertNotIn('[b2proxy]', output)
+
+
+class RcloneConfigTests(unittest.TestCase):
+    def test_token_csv_and_path_placeholder(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            deploy.print_rclone_config('  https://test.example.workers.dev\n',
+                                      {'BUCKET_NAME': '$path', 'ALLOW_LIST_BUCKET': 'true'}, 'a,b"c')
+        self.assertIn('url = https://test.example.workers.dev/YOUR_BUCKET_NAME/', output.getvalue())
+        self.assertIn('headers = x-proxy-token,"a,b""c"', output.getvalue())
+
+    def test_missing_url_uses_explicit_placeholder(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            deploy.print_rclone_config('', {'BUCKET_NAME': 'bucket'}, 'token')
+        self.assertIn('url = https://YOUR_WORKER_HOST/', output.getvalue())
+        self.assertIn('Replace the uppercase URL placeholders', output.getvalue())
 
 
 if __name__ == '__main__':

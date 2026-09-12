@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Interactive Cloudflare deployment (Python 3.11+, Node.js 22+)."""
 import argparse
+import csv
 import getpass
+import io
 import json
 import os
 from pathlib import Path
@@ -64,8 +66,42 @@ def select_endpoint(saved=''):
     return endpoints[int(choice) - 1]
 
 
-def run(*args):
+def run(*args, capture_output=False):
+    if capture_output:
+        output = []
+        with subprocess.Popen(['node', str(WRANGLER), *args], cwd=ROOT,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+            for line in process.stdout:
+                print(line, end='', flush=True)
+                output.append(line)
+            if process.wait():
+                raise subprocess.CalledProcessError(process.returncode, process.args)
+        return ''.join(output)
     subprocess.run(['node', str(WRANGLER), *args], cwd=ROOT, check=True)
+
+
+def print_rclone_config(output, variables, token):
+    # Wrangler prints the deployed URL on its own line. Strip terminal colors first.
+    plain = re.sub(r'\x1b\[[0-9;]*m', '', output or '')
+    urls = re.findall(r'^\s*(https://[a-zA-Z0-9.-]+(?:/[^\s]*)?)\s*$', plain, re.MULTILINE)
+    url = urls[-1].rstrip('/') + '/' if urls else 'https://YOUR_WORKER_HOST/'
+    if variables['BUCKET_NAME'] == '$path':
+        url += 'YOUR_BUCKET_NAME/'
+    elif variables['BUCKET_NAME'] == '$host':
+        url = 'https://YOUR_BUCKET_NAME.YOUR_CUSTOM_DOMAIN/'
+    headers = io.StringIO()
+    csv.writer(headers, lineterminator='').writerow(['x-proxy-token', token])
+    print('\nAdd this section to your rclone config file (find it with: rclone config file):')
+    if not urls or variables['BUCKET_NAME'] in ('$path', '$host'):
+        print('Replace the uppercase URL placeholders with your deployed host and bucket name.')
+    if variables.get('ALLOW_LIST_BUCKET') != 'true':
+        print('To use rclone ls, redeploy with Allow bucket listing set to true.')
+    if variables.get('RCLONE_DOWNLOAD') == 'true':
+        print('For this HTTP remote, redeploy with B2 backend URL conversion set to false.')
+    print('\n[b2proxy]\ntype = http')
+    print(f'url = {url}')
+    print(f'headers = {headers.getvalue()}')
+    print('\nList files: rclone ls b2proxy:')
 
 
 def get_identity():
@@ -175,10 +211,11 @@ def main():
         fd, path = tempfile.mkstemp(suffix='.json', dir=directory)
         with os.fdopen(fd, 'w') as stream:
             json.dump(secrets, stream)
-        run('deploy', '--config', str(CONFIG), '--secrets-file', path)
+        output = run('deploy', '--config', str(CONFIG), '--secrets-file', path, capture_output=True)
     print('Deployment complete. Include the x-proxy-token header when accessing the Worker.')
     if generate_proxy_token:
         print(f"PROXY_TOKEN: {secrets['PROXY_TOKEN']}")
+    print_rclone_config(output, variables, secrets['PROXY_TOKEN'])
 
 
 if __name__ == '__main__':

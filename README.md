@@ -73,7 +73,11 @@ directories and all pages of B2 results. Files retain their original responses.
 Leave `RCLONE_DOWNLOAD` set to `false` for a standard HTTP remote; that option
 is for B2's `--b2-download-url` path format.
 
-Add a remote to your rclone configuration:
+After a successful deployment, the script prints a ready-to-use rclone configuration
+with the deployed URL and proxy token (including manually entered tokens).
+Run `rclone config file` to find your configuration file, then add the printed section.
+If the URL contains uppercase placeholders, replace them with your host or bucket name.
+The output has this format:
 
 ```ini
 [b2proxy]
