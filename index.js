@@ -4,11 +4,13 @@
 // Adapted from https://github.com/obezuk/worker-signed-s3-template
 //
 import { AwsClient } from 'aws4fetch'
+import { listDirectory } from './listing.js';
 
 const UNSIGNABLE_HEADERS = [
     // These headers appear in the request, but are never passed upstream
     'x-forwarded-proto',
     'x-real-ip',
+    'x-proxy-token',
     // We can't include accept-encoding in the signature because Cloudflare
     // sets the incoming accept-encoding header to "gzip, br", then modifies
     // the outgoing request to set accept-encoding to "gzip".
@@ -61,6 +63,17 @@ function isListBucketRequest(env, path) {
 // noinspection JSUnusedGlobalSymbols
 export default {
     async fetch(request, env) {
+        // Require proxy authentication
+        const proxyToken = request.headers.get('x-proxy-token');
+        if (!env['PROXY_TOKEN'] || proxyToken !== env['PROXY_TOKEN']) {
+            return new Response('Unauthorized', {
+                status: 401,
+                headers: {
+                    'Cache-Control': 'no-store'
+                }
+            });
+        }
+
         // Only allow GET and HEAD methods
         if (!['GET', 'HEAD'].includes(request.method)){
             return new Response(null, {
@@ -133,6 +146,14 @@ export default {
                 // Remove leading file/{bucket_name}/ prefix from the path 
                 url.pathname = path.replace(/^file\/[^/]+\//, "");
             }            
+            if (new URL(request.url).pathname.endsWith('/') && !url.pathname.endsWith('/')) {
+                url.pathname += '/';
+            }
+        }
+
+        if (url.pathname.endsWith('/') || (env.BUCKET_NAME === '$path' && !url.pathname.slice(1).includes('/'))) {
+            const response = await listDirectory(client, url, env, request);
+            return requestMethod === 'HEAD' ? createHeadResponse(response) : response;
         }
 
         // Sign the outgoing request
@@ -194,15 +215,23 @@ export default {
         }
 
         // Send the signed request to B2
-        const fetchPromise = fetch(signedRequest);
+        let response = await fetch(signedRequest);
+        if (response.status === 404 && String(env.ALLOW_LIST_BUCKET) === 'true') {
+            const listing = await listDirectory(client, url, env, request, true);
+            if (listing.status !== 404) {
+                await response.body?.cancel();
+                response = listing;
+            } else {
+                await listing.body?.cancel();
+            }
+        }
 
         if (requestMethod === 'HEAD') {
-            const response = await fetchPromise;
             // Original request was HEAD, so return a new Response without a body
             return createHeadResponse(response);
         }
 
         // Return the upstream response unchanged
-        return fetchPromise;
+        return response;
     },
 };
